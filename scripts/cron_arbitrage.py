@@ -44,7 +44,7 @@ async def main():
     
     try:
         # Initialize Exchanges for Public Data (No API Keys needed)
-        binance = ccxt.binance({
+        bybit = ccxt.bybit({
             'enableRateLimit': True
         })
         
@@ -52,35 +52,35 @@ async def main():
             'enableRateLimit': True
         })
         
-        logger.info(f"Checking prices for {symbol} on Binance and KuCoin...")
+        logger.info(f"Checking prices for {symbol} on Bybit and KuCoin...")
         
         # Fetch Tickers
-        binance_ticker = binance.fetch_ticker(symbol)
+        bybit_ticker = bybit.fetch_ticker(symbol)
         kucoin_ticker = kucoin.fetch_ticker(symbol)
         
-        binance_ask = binance_ticker['ask']
-        binance_bid = binance_ticker['bid']
+        bybit_ask = bybit_ticker['ask']
+        bybit_bid = bybit_ticker['bid']
         
         kucoin_ask = kucoin_ticker['ask']
         kucoin_bid = kucoin_ticker['bid']
         
-        logger.info(f"Binance | Ask: {binance_ask}, Bid: {binance_bid}")
+        logger.info(f"Bybit   | Ask: {bybit_ask}, Bid: {bybit_bid}")
         logger.info(f"KuCoin  | Ask: {kucoin_ask}, Bid: {kucoin_bid}")
         
         # Calculate Arbitrage Opportunities
-        # Scenario 1: Buy on Binance, Sell on KuCoin
-        profit_margin_1 = (kucoin_bid - binance_ask) / binance_ask
-        # Scenario 2: Buy on KuCoin, Sell on Binance
-        profit_margin_2 = (binance_bid - kucoin_ask) / kucoin_ask
+        # Scenario 1: Buy on Bybit, Sell on KuCoin
+        profit_margin_1 = (kucoin_bid - bybit_ask) / bybit_ask
+        # Scenario 2: Buy on KuCoin, Sell on Bybit
+        profit_margin_2 = (bybit_bid - kucoin_ask) / kucoin_ask
         
         best_scenario = None
         best_margin = 0
         
         if profit_margin_1 > min_profit_margin:
-            best_scenario = "Buy Binance, Sell KuCoin"
+            best_scenario = "Buy Bybit, Sell KuCoin"
             best_margin = profit_margin_1
         elif profit_margin_2 > min_profit_margin:
-            best_scenario = "Buy KuCoin, Sell Binance"
+            best_scenario = "Buy KuCoin, Sell Bybit"
             best_margin = profit_margin_2
             
         if best_scenario:
