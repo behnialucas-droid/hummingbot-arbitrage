@@ -1,0 +1,37 @@
+name: Arbitrage Bot (Cron)
+
+on:
+  schedule:
+    # Runs every 5 minutes
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  run-arbitrage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        
+    - name: Install CCXT for lightweight execution
+      run: |
+        pip install ccxt asyncio cryptography python-telegram-bot
+        
+    - name: Run Arbitrage Script (Single Execution)
+      env:
+        BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+        BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
+        KUCOIN_API_KEY: ${{ secrets.KUCOIN_API_KEY }}
+        KUCOIN_API_SECRET: ${{ secrets.KUCOIN_API_SECRET }}
+        KUCOIN_API_PASSPHRASE: ${{ secrets.KUCOIN_API_PASSPHRASE }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        python scripts/cron_arbitrage.py
