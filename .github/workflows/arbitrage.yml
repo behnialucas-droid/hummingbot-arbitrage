@@ -1,26 +1,27 @@
-name: 🤖 Arbitrage Bot (Cron)
+name: 🤖 Arbitrage Bot (1-min Scan)
 
 on:
   schedule:
-    # Every 5 minutes — minimum possible on GitHub Actions
-    - cron: '*/5 * * * *'
-  push:
-    branches: ["master"]
-  workflow_dispatch:
+    # Every 1 minute — absolute minimum on GitHub Actions (like SMC fast.yml pattern)
+    # Scan runs every minute; Telegram throttled to every 5 scans inside Python script
+    - cron: '*/1 * * * *'
+  workflow_dispatch:   # Manual trigger for testing
 
 concurrency:
   group: arbitrage-bot
-  cancel-in-progress: false  # Never cancel a running scan
+  cancel-in-progress: true   # Like SMC fast.yml: skip if previous run still active
 
 jobs:
   scan:
     name: Arbitrage Scan
     runs-on: ubuntu-latest
-    timeout-minutes: 4  # Hard 4-min limit — must finish before next 5-min cron
+    timeout-minutes: 4   # Hard 4-min limit (same as SMC fast.yml)
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1   # Fastest checkout — like SMC
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -32,6 +33,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r scripts/requirements.txt
 
+      - name: Download previous state (paper balance persistence)
+        uses: actions/download-artifact@v4
+        with:
+          name: arb-state
+          path: /tmp/
+        continue-on-error: true   # First run: no artifact exists yet, that is OK
+
       - name: Run Arbitrage Scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -40,10 +48,11 @@ jobs:
           MIN_PROFIT_PCT:     "0.001"
           MAX_TRADE_PCT:      "0.02"
           STOP_LOSS_PCT:      "0.10"
+          TG_EVERY_N:         "5"     # Telegram every 5 scans = every ~5 minutes
         run: python scripts/cron_arbitrage.py
 
       - name: Upload state artifact (paper balance persistence)
-        if: always()
+        if: always()   # Always save state — even if scan had errors
         uses: actions/upload-artifact@v4
         with:
           name: arb-state

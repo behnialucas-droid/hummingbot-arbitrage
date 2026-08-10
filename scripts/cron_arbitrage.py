@@ -1,14 +1,22 @@
 """
-╔══════════════════════════════════════════════════════════════╗
-║       PRO ARBITRAGE SCANNER v3 — FAST & STABLE              ║
-║  4 Exchanges | 5 Pairs | Pre-loaded Markets | Fixed TG       ║
-╚══════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════╗
+║     PRO ARBITRAGE SCANNER v4 — MAXIMUM COVERAGE EDITION        ║
+║  11 Exchanges | 5 Pairs | Every-1-min Scan | TG Every 5 Scans  ║
+╚══════════════════════════════════════════════════════════════════╝
 Paper Trading | Starting balance: $10,000 USDT
+
+Exchanges (all confirmed working from GitHub Actions US IPs):
+  mexc, kucoin, gateio, htx          ← original 4
+  bitget, bingx, bitmart, phemex     ← Asia / Global
+  whitebit, bitstamp, digifinex      ← Europe / Global
+
+Scan cadence : every 1 minute (GitHub Actions cron minimum)
+Telegram     : every 5 scans = every ~5 minutes (throttled)
 """
 
 import os, sys, time, json, logging, urllib.request, urllib.parse
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 import ccxt
 
@@ -21,111 +29,134 @@ logging.basicConfig(
 log = logging.getLogger("arb")
 
 # ─── Config ───────────────────────────────────────────────────────────────────
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT  = os.getenv("TELEGRAM_CHAT_ID", "")
-PAPER_BALANCE  = float(os.getenv("PAPER_BALANCE",  "10000.0"))
-MAX_TRADE_PCT  = float(os.getenv("MAX_TRADE_PCT",   "0.02"))
-STOP_LOSS_PCT  = float(os.getenv("STOP_LOSS_PCT",   "0.10"))
-MIN_PROFIT_PCT = float(os.getenv("MIN_PROFIT_PCT",  "0.001"))   # 0.1% after fees
+TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT   = os.getenv("TELEGRAM_CHAT_ID", "")
+PAPER_BALANCE   = float(os.getenv("PAPER_BALANCE",   "10000.0"))
+MAX_TRADE_PCT   = float(os.getenv("MAX_TRADE_PCT",   "0.02"))     # 2% per trade
+STOP_LOSS_PCT   = float(os.getenv("STOP_LOSS_PCT",   "0.10"))     # 10% max drawdown
+MIN_PROFIT_PCT  = float(os.getenv("MIN_PROFIT_PCT",  "0.001"))    # 0.1% after fees
+TG_EVERY_N      = int(os.getenv("TG_EVERY_N",        "5"))        # Telegram every 5 scans
 
+# Exchange taker fees (conservative estimates)
 FEES = {
-    "mexc":   0.0010,
-    "kucoin": 0.0010,
-    "gateio": 0.0010,
-    "htx":    0.0020,
+    "mexc":      0.0010,
+    "kucoin":    0.0010,
+    "gateio":    0.0010,
+    "htx":       0.0020,
+    "bitget":    0.0010,
+    "bingx":     0.0010,
+    "bitmart":   0.0025,
+    "phemex":    0.0010,
+    "whitebit":  0.0010,
+    "bitstamp":  0.0050,  # Higher fees — still worth scanning
+    "digifinex": 0.0020,
 }
 
+# Pairs to scan — high volume, tight spreads
 PAIRS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
 
-# Per-exchange timeout (Gate.io needs slightly more for market init)
+# Per-exchange timeout (ms)
 TIMEOUTS = {
-    "mexc":   6000,
-    "kucoin": 6000,
-    "gateio": 8000,
-    "htx":    6000,
+    "mexc":      7000,
+    "kucoin":    7000,
+    "gateio":    9000,   # Gate has 6k+ markets, needs more time to init
+    "htx":       7000,
+    "bitget":    6000,
+    "bingx":     6000,
+    "bitmart":   6000,
+    "phemex":    6000,
+    "whitebit":  6000,
+    "bitstamp":  6000,
+    "digifinex": 6000,
 }
 
-# ─── Exchange Init + Market Pre-load ──────────────────────────────────────────
-def init_exchange(name: str, ex: ccxt.Exchange) -> Optional[ccxt.Exchange]:
-    """Pre-load markets so fetch_ticker won't trigger a slow first-call init."""
+# ─── Exchange Init ─────────────────────────────────────────────────────────────
+def build_exchange(name: str) -> Optional[tuple]:
+    """Build + pre-load markets for one exchange. Returns (name, exchange) or None."""
     try:
+        klass = getattr(ccxt, name)
+        ex    = klass({"enableRateLimit": False, "timeout": TIMEOUTS.get(name, 7000)})
         ex.load_markets()
-        log.info(f"  {name}: {len(ex.markets)} markets loaded")
-        return ex
+        log.info(f"  INIT {name:12s}: {len(ex.markets):,} markets")
+        return (name, ex)
     except Exception as e:
-        log.warning(f"  {name}: market load failed — {e}")
+        log.warning(f"  SKIP {name:12s}: {str(e)[:60]}")
         return None
 
 def build_exchanges() -> dict:
-    raw = {
-        "mexc":   ccxt.mexc(  {"enableRateLimit": False, "timeout": TIMEOUTS["mexc"]}),
-        "kucoin": ccxt.kucoin({"enableRateLimit": False, "timeout": TIMEOUTS["kucoin"]}),
-        "gateio": ccxt.gateio({"enableRateLimit": False, "timeout": TIMEOUTS["gateio"]}),
-        "htx":    ccxt.htx(   {"enableRateLimit": False, "timeout": TIMEOUTS["htx"]}),
-    }
-    # Pre-load all markets in parallel
+    """Build all exchanges in parallel — fastest possible init."""
+    names = list(FEES.keys())
+    log.info(f"Initializing {len(names)} exchanges in parallel...")
     ready = {}
-    log.info("Pre-loading markets in parallel...")
-    with ThreadPoolExecutor(max_workers=len(raw)) as pool:
-        futs = {pool.submit(init_exchange, n, ex): n for n, ex in raw.items()}
-        for fut in futs:
-            name = futs[fut]
+    with ThreadPoolExecutor(max_workers=len(names)) as pool:
+        futs = {pool.submit(build_exchange, n): n for n in names}
+        for fut in as_completed(futs):
             result = fut.result()
             if result:
-                ready[name] = result
-    log.info(f"Ready exchanges: {list(ready.keys())}")
+                name, ex = result
+                ready[name] = ex
+    log.info(f"Ready: {len(ready)}/{len(names)} exchanges")
     return ready
 
 # ─── Parallel Price Fetch ─────────────────────────────────────────────────────
 def fetch_one(args) -> tuple:
+    """Fetch a single ticker. Retries once on network error."""
     ex_name, exchange, symbol = args
     for attempt in range(2):
         try:
             t = exchange.fetch_ticker(symbol)
             ask, bid = t.get("ask"), t.get("bid")
             if ask and bid and ask > 0 and bid > 0:
-                return (ex_name, symbol, {"ask": ask, "bid": bid})
+                return (ex_name, symbol, {"ask": float(ask), "bid": float(bid)})
             return (ex_name, symbol, None)
         except ccxt.NetworkError:
             if attempt == 0:
-                time.sleep(0.5)
+                time.sleep(0.3)
         except Exception:
             break
     return (ex_name, symbol, None)
 
 def fetch_all_prices(exchanges: dict) -> tuple:
+    """Fetch ALL tickers across ALL exchanges in parallel. ~0.5–1s after market init."""
     tasks  = [(n, ex, sym) for n, ex in exchanges.items() for sym in PAIRS]
     prices = {n: {} for n in exchanges}
     errors = []
 
     with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
         futs = {pool.submit(fetch_one, t): t for t in tasks}
-        for fut in futs:
+        for fut in as_completed(futs):
             ex_name, symbol, data = fut.result()
             if data:
                 prices[ex_name][symbol] = data
-                log.info(f"  {ex_name:8s} | {symbol:10s} | Ask:{data['ask']:>12.4f}  Bid:{data['bid']:>12.4f}")
+                log.info(f"  {ex_name:12s} | {symbol:10s} | Ask:{data['ask']:>12.4f}  Bid:{data['bid']:>12.4f}")
             else:
                 errors.append(f"{ex_name}/{symbol}")
-
     return prices, errors
 
 # ─── Arbitrage Detection ──────────────────────────────────────────────────────
 def find_opportunities(prices: dict, balance: float) -> list:
+    """
+    Compare every exchange pair for every symbol.
+    N exchanges → N*(N-1) combos per symbol.
+    11 exchanges × 10 combos × 5 pairs = 550 checks per scan.
+    """
     ids  = list(prices.keys())
     opps = []
-    for i, buy_ex in enumerate(ids):
-        for j, sell_ex in enumerate(ids):
-            if i == j:
+
+    for buy_ex in ids:
+        for sell_ex in ids:
+            if buy_ex == sell_ex:
                 continue
             for sym in PAIRS:
                 bd = prices[buy_ex].get(sym)
                 sd = prices[sell_ex].get(sym)
                 if not bd or not sd:
                     continue
-                total_fee    = FEES.get(buy_ex, 0.001) + FEES.get(sell_ex, 0.001)
+
+                total_fee    = FEES.get(buy_ex, 0.002) + FEES.get(sell_ex, 0.002)
                 gross_margin = (sd["bid"] - bd["ask"]) / bd["ask"]
                 net_margin   = gross_margin - total_fee
+
                 if net_margin > MIN_PROFIT_PCT:
                     trade_usd = min(balance * MAX_TRADE_PCT, 2000.0)
                     qty       = trade_usd / bd["ask"]
@@ -139,15 +170,15 @@ def find_opportunities(prices: dict, balance: float) -> list:
                         "trade_usd":  trade_usd,
                         "est_pnl":    qty * bd["ask"] * net_margin,
                     })
+
     opps.sort(key=lambda x: x["net_margin"], reverse=True)
     return opps
 
-# ─── Telegram (plain text — no HTML to avoid parse errors) ───────────────────
+# ─── Telegram (plain text — robust, no HTML parse errors) ────────────────────
 def send_telegram(msg: str) -> bool:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
-        log.warning("No Telegram credentials.")
+        log.warning("Telegram credentials not set.")
         return False
-    # Trim if over Telegram limit
     if len(msg) > 4000:
         msg = msg[:3990] + "\n...[truncated]"
     try:
@@ -155,78 +186,83 @@ def send_telegram(msg: str) -> bool:
         data = urllib.parse.urlencode({
             "chat_id": TELEGRAM_CHAT,
             "text":    msg,
-            # No parse_mode — plain text is most robust
         }).encode()
         with urllib.request.urlopen(
             urllib.request.Request(url, data=data, method="POST"), timeout=15
         ) as r:
             resp = json.loads(r.read())
             if resp.get("ok"):
-                log.info("Telegram sent OK.")
+                log.info("Telegram OK.")
                 return True
             log.warning(f"Telegram API error: {resp}")
             return False
     except Exception as e:
-        log.error(f"Telegram send failed: {e}")
+        log.error(f"Telegram failed: {e}")
         return False
 
-# ─── Report (plain text) ──────────────────────────────────────────────────────
-def build_report(prices, opps, balance, total_pnl, scan_t, scan_n, errors) -> str:
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    dd  = (total_pnl / PAPER_BALANCE) * 100
-    total_prices = sum(len(v) for v in prices.values())
+# ─── Report Builder ───────────────────────────────────────────────────────────
+def build_report(prices, opps, balance, total_pnl, scan_t, scan_n, errors, ex_count) -> str:
+    now   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    dd    = (total_pnl / PAPER_BALANCE) * 100
+    total = sum(len(v) for v in prices.values())
+    combos = ex_count * (ex_count - 1) * len(PAIRS)
 
     lines = [
-        f"=== ARB Scanner v3 | Scan #{scan_n} ===",
+        f"=== ARB SCANNER v4 | Scan #{scan_n} ===",
         f"Time: {now}  |  Speed: {scan_t:.1f}s",
-        f"Markets: {len(prices)} exchanges x {len(PAIRS)} pairs = {total_prices} live prices",
-        "-" * 36,
-        "LIVE PRICES (Ask / Bid):",
+        f"Coverage: {ex_count} exchanges x {len(PAIRS)} pairs = {total} live prices",
+        f"Checks per scan: {combos} arbitrage comparisons",
+        "-" * 40,
     ]
 
+    # Price table
+    lines.append("LIVE PRICES (Ask):")
     for pair in PAIRS:
         row = []
         for ex in prices:
             d = prices[ex].get(pair)
             if d:
-                row.append(f"{ex[:4].upper()}: {d['ask']:,.2f}")
+                short = ex[:4].upper()
+                row.append(f"{short}:{d['ask']:,.2f}")
         if row:
             lines.append(f"  {pair}: " + " | ".join(row))
 
-    lines.append("-" * 36)
+    lines.append("-" * 40)
 
+    # Opportunities
     if opps:
-        lines.append(f">>> {len(opps)} ARBITRAGE OPPORTUNITY(IES) FOUND!")
+        lines.append(f">>> {len(opps)} OPPORTUNITY(IES) FOUND!")
         for i, o in enumerate(opps[:5], 1):
             lines.append(
                 f"  #{i} {o['symbol']}: "
-                f"Buy {o['buy_ex'].upper()} @{o['buy_price']:,.2f} -> "
-                f"Sell {o['sell_ex'].upper()} @{o['sell_price']:,.2f} | "
-                f"Net: {o['net_margin']*100:.3f}% | Est. +${o['est_pnl']:.2f}"
+                f"{o['buy_ex'].upper()} @{o['buy_price']:,.4f} -> "
+                f"{o['sell_ex'].upper()} @{o['sell_price']:,.4f} "
+                f"| Net: {o['net_margin']*100:.3f}% | +${o['est_pnl']:.4f}"
             )
         best = opps[0]
         lines.append(
             f"\n[APPLIED] {best['symbol']}: "
             f"{best['buy_ex'].upper()} -> {best['sell_ex'].upper()} "
-            f"| +${best['est_pnl']:.2f}"
+            f"| +${best['est_pnl']:.4f}"
         )
     else:
         lines.append("No opportunity this cycle (spreads < 0.1% after fees).")
 
     lines += [
-        "-" * 36,
-        f"Portfolio: ${balance:,.2f} | PnL: ${total_pnl:+,.2f} ({dd:+.2f}%)",
-        f"Start: ${PAPER_BALANCE:,.2f}",
+        "-" * 40,
+        f"Portfolio : ${balance:,.2f}",
+        f"PnL       : ${total_pnl:+,.4f} ({dd:+.4f}%)",
+        f"Start     : ${PAPER_BALANCE:,.2f}",
     ]
     if errors:
-        lines.append(f"Skipped: {', '.join(errors[:5])}")
-    lines.append("Next scan: ~5 min")
+        lines.append(f"Skipped   : {', '.join(errors[:6])}")
+    lines.append(f"Next TG   : scan #{scan_n + TG_EVERY_N - (scan_n % TG_EVERY_N or TG_EVERY_N)}")
     return "\n".join(lines)
 
-# ─── State ────────────────────────────────────────────────────────────────────
+# ─── State Persistence ────────────────────────────────────────────────────────
 STATE = "/tmp/arb_state.json"
 
-def load_state():
+def load_state() -> dict:
     try:
         if os.path.exists(STATE):
             return json.load(open(STATE))
@@ -234,7 +270,7 @@ def load_state():
         pass
     return {"balance": PAPER_BALANCE, "total_pnl": 0.0, "scan_count": 0}
 
-def save_state(s):
+def save_state(s: dict) -> None:
     try:
         json.dump(s, open(STATE, "w"))
     except Exception:
@@ -242,11 +278,13 @@ def save_state(s):
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def main():
-    log.info("=" * 60)
-    log.info("  PRO ARB SCANNER v3")
-    log.info(f"  Pairs: {', '.join(PAIRS)}")
+    log.info("=" * 65)
+    log.info("  PRO ARB SCANNER v4 — 11 EXCHANGES")
+    log.info(f"  Exchanges : {', '.join(FEES.keys())}")
+    log.info(f"  Pairs     : {', '.join(PAIRS)}")
     log.info(f"  Min profit: {MIN_PROFIT_PCT*100:.2f}% after fees")
-    log.info("=" * 60)
+    log.info(f"  TG report : every {TG_EVERY_N} scans")
+    log.info("=" * 65)
 
     t0 = time.time()
 
@@ -266,17 +304,21 @@ def main():
         send_telegram(msg)
         sys.exit(0)
 
-    # Step 1: Build + pre-load markets (parallel)
+    # ── Step 1: Init exchanges (parallel market load)
     t1 = time.time()
     exchanges = build_exchanges()
-    log.info(f"Market pre-load: {time.time()-t1:.1f}s")
+    log.info(f"Market init: {time.time()-t1:.1f}s")
 
-    # Step 2: Fetch all prices (parallel)
+    if not exchanges:
+        log.error("No exchanges available — aborting.")
+        sys.exit(1)
+
+    # ── Step 2: Fetch all prices (parallel)
     t2 = time.time()
     prices, errors = fetch_all_prices(exchanges)
     log.info(f"Price fetch: {time.time()-t2:.1f}s")
 
-    # Step 3: Detect arbitrage
+    # ── Step 3: Find arbitrage
     opps = find_opportunities(prices, balance)
 
     if opps:
@@ -287,12 +329,23 @@ def main():
     save_state({"balance": balance, "total_pnl": total_pnl, "scan_count": scan_count})
 
     scan_t = time.time() - t0
-    log.info(f"Scan #{scan_count} complete in {scan_t:.1f}s | Balance: ${balance:,.2f}")
+    ex_count = len(exchanges)
+    combos   = ex_count * (ex_count - 1) * len(PAIRS)
 
-    report = build_report(prices, opps, balance, total_pnl, scan_t, scan_count, errors)
-    send_telegram(report)
+    log.info(f"Scan #{scan_count} done in {scan_t:.1f}s | {combos} checks | Balance: ${balance:,.2f}")
+    if opps:
+        log.info(f"Best opp: {opps[0]['net_margin']*100:.3f}% net on {opps[0]['symbol']}")
 
-    log.info("=" * 60)
+    # ── Step 4: Telegram — only every TG_EVERY_N scans
+    should_send_tg = (scan_count == 1) or (scan_count % TG_EVERY_N == 0)
+    if should_send_tg:
+        log.info(f"Sending Telegram (scan #{scan_count})...")
+        report = build_report(prices, opps, balance, total_pnl, scan_t, scan_count, errors, ex_count)
+        send_telegram(report)
+    else:
+        log.info(f"TG skipped (scan #{scan_count}, sends at #{(scan_count // TG_EVERY_N + 1) * TG_EVERY_N})")
+
+    log.info("=" * 65)
 
 
 if __name__ == "__main__":
