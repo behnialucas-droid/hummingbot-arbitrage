@@ -1,39 +1,52 @@
-name: Arbitrage Bot (Cron)
+name: 🤖 Arbitrage Bot (Cron)
 
 on:
   schedule:
-    # Runs every 5 minutes
+    # Every 5 minutes — minimum possible on GitHub Actions
     - cron: '*/5 * * * *'
   push:
-    branches: [ "master" ]
+    branches: ["master"]
   workflow_dispatch:
 
+concurrency:
+  group: arbitrage-bot
+  cancel-in-progress: false  # Never cancel a running scan
+
 jobs:
-  run-arbitrage:
+  scan:
+    name: Arbitrage Scan
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    
+    timeout-minutes: 4  # Hard 4-min limit — must finish before next 5-min cron
+
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v3
-      
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
-        
-    - name: Install CCXT for lightweight execution
-      run: |
-        pip install ccxt asyncio cryptography python-telegram-bot
-        
-    - name: Run Arbitrage Script (Single Execution)
-      env:
-        BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
-        BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
-        KUCOIN_API_KEY: ${{ secrets.KUCOIN_API_KEY }}
-        KUCOIN_API_SECRET: ${{ secrets.KUCOIN_API_SECRET }}
-        KUCOIN_API_PASSPHRASE: ${{ secrets.KUCOIN_API_PASSPHRASE }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      run: |
-        python scripts/cron_arbitrage.py
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: "scripts/requirements.txt"
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Run Arbitrage Scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          PAPER_BALANCE:      "10000.0"
+          MIN_PROFIT_PCT:     "0.001"
+          MAX_TRADE_PCT:      "0.02"
+          STOP_LOSS_PCT:      "0.10"
+        run: python scripts/cron_arbitrage.py
+
+      - name: Upload state artifact (paper balance persistence)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arb-state
+          path: /tmp/arb_state.json
+          retention-days: 1
+          overwrite: true
