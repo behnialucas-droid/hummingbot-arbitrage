@@ -44,7 +44,7 @@ async def main():
     
     try:
         # Initialize Exchanges for Public Data (No API Keys needed)
-        bybit = ccxt.bybit({
+        mexc = ccxt.mexc({
             'enableRateLimit': True
         })
         
@@ -52,35 +52,35 @@ async def main():
             'enableRateLimit': True
         })
         
-        logger.info(f"Checking prices for {symbol} on Bybit and KuCoin...")
+        logger.info(f"Checking prices for {symbol} on MEXC and KuCoin...")
         
         # Fetch Tickers
-        bybit_ticker = bybit.fetch_ticker(symbol)
+        mexc_ticker = mexc.fetch_ticker(symbol)
         kucoin_ticker = kucoin.fetch_ticker(symbol)
         
-        bybit_ask = bybit_ticker['ask']
-        bybit_bid = bybit_ticker['bid']
+        mexc_ask = mexc_ticker['ask']
+        mexc_bid = mexc_ticker['bid']
         
         kucoin_ask = kucoin_ticker['ask']
         kucoin_bid = kucoin_ticker['bid']
         
-        logger.info(f"Bybit   | Ask: {bybit_ask}, Bid: {bybit_bid}")
+        logger.info(f"MEXC    | Ask: {mexc_ask}, Bid: {mexc_bid}")
         logger.info(f"KuCoin  | Ask: {kucoin_ask}, Bid: {kucoin_bid}")
         
         # Calculate Arbitrage Opportunities
-        # Scenario 1: Buy on Bybit, Sell on KuCoin
-        profit_margin_1 = (kucoin_bid - bybit_ask) / bybit_ask
-        # Scenario 2: Buy on KuCoin, Sell on Bybit
-        profit_margin_2 = (bybit_bid - kucoin_ask) / kucoin_ask
+        # Scenario 1: Buy on MEXC, Sell on KuCoin
+        profit_margin_1 = (kucoin_bid - mexc_ask) / mexc_ask
+        # Scenario 2: Buy on KuCoin, Sell on MEXC
+        profit_margin_2 = (mexc_bid - kucoin_ask) / kucoin_ask
         
         best_scenario = None
         best_margin = 0
         
         if profit_margin_1 > min_profit_margin:
-            best_scenario = "Buy Bybit, Sell KuCoin"
+            best_scenario = "Buy MEXC, Sell KuCoin"
             best_margin = profit_margin_1
         elif profit_margin_2 > min_profit_margin:
-            best_scenario = "Buy KuCoin, Sell Bybit"
+            best_scenario = "Buy KuCoin, Sell MEXC"
             best_margin = profit_margin_2
             
         if best_scenario:
