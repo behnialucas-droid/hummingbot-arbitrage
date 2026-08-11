@@ -33,7 +33,9 @@ jobs:
           cache-dependency-path: "scripts/requirements.txt"
 
       - name: Install dependencies
-        run: pip install -r scripts/requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r scripts/requirements.txt
 
       - name: Configure Git (for state persistence via git commit)
         run: |
