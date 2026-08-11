@@ -1,27 +1,29 @@
-name: 🤖 Arbitrage Bot (1-min Scan)
+name: 🤖 Arbitrage Bot (5-min Scan)
 
 on:
   schedule:
-    # Every 1 minute — absolute minimum on GitHub Actions (like SMC fast.yml pattern)
-    # Scan runs every minute; Telegram throttled to every 5 scans inside Python script
-    - cron: '*/1 * * * *'
-  workflow_dispatch:   # Manual trigger for testing
+    # FIX 1: Every 5 minutes — GitHub's actual minimum (*/1 was throttled, avg 66min gap).
+    # FIX 3: Telegram sent every run — no throttle needed since each run is 5+ min apart.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 concurrency:
   group: arbitrage-bot
-  cancel-in-progress: true   # Like SMC fast.yml: skip if previous run still active
+  cancel-in-progress: true
 
 jobs:
   scan:
     name: Arbitrage Scan
     runs-on: ubuntu-latest
-    timeout-minutes: 4   # Hard 4-min limit (same as SMC fast.yml)
+    timeout-minutes: 4
+    permissions:
+      contents: write   # Needed for git push of arb_state.json
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1   # Fastest checkout — like SMC
+          fetch-depth: 1
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -33,12 +35,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r scripts/requirements.txt
 
-      - name: Download previous state (paper balance persistence)
-        uses: actions/download-artifact@v4
-        with:
-          name: arb-state
-          path: /tmp/
-        continue-on-error: true   # First run: no artifact exists yet, that is OK
+      - name: Configure Git (for state persistence via git commit)
+        run: |
+          git config --global user.name  "Arb Bot"
+          git config --global user.email "arb-bot@users.noreply.github.com"
 
       - name: Run Arbitrage Scanner
         env:
@@ -48,14 +48,4 @@ jobs:
           MIN_PROFIT_PCT:     "0.001"
           MAX_TRADE_PCT:      "0.02"
           STOP_LOSS_PCT:      "0.10"
-          TG_EVERY_N:         "5"     # Telegram every 5 scans = every ~5 minutes
         run: python scripts/cron_arbitrage.py
-
-      - name: Upload state artifact (paper balance persistence)
-        if: always()   # Always save state — even if scan had errors
-        uses: actions/upload-artifact@v4
-        with:
-          name: arb-state
-          path: /tmp/arb_state.json
-          retention-days: 1
-          overwrite: true
