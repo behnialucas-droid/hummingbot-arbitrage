@@ -1,1 +1,5 @@
-{"balance": 10000.0, "total_pnl": 0.0, "scan_count": 0}
+{
+  "balance": 10000.0,
+  "total_pnl": 0.0,
+  "scan_count": 1
+}
